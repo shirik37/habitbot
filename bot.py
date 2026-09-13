@@ -429,6 +429,8 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "*Отжимания 07:30 будни*\n"
             "*Отжимания 09:00 18:00* (несколько времён)\n"
             "*Йога 19:00 вт,чт*\n\n"
+            "Можно добавить сразу несколько привычек — каждую с новой строки или через точку:\n"
+            "*Отжимания 07:30. Вода 08:00 12:00 16:00. Йога 19:00 вт,чт*\n\n"
             "Или просто название — время и дни спрошу отдельно:\n"
             "*Выпить воду*",
             parse_mode="Markdown"
@@ -616,6 +618,43 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = get_user(data, uid)
 
     if state["action"] == "add":
+        bulk_parts = split_bulk_input(text)
+        if bulk_parts:
+            added = []
+            skipped = []
+            for part in bulk_parts:
+                name, times, days = parse_add_input(part)
+                if not name:
+                    skipped.append(part)
+                    continue
+                habit = {
+                    "id": u["next_id"],
+                    "name": name,
+                    "emoji": "✅",
+                    "times": times or [],
+                    "done": False,
+                    "days": sorted(days) if days else list(range(7)),
+                }
+                ensure_habit_fields(habit)
+                habit["days"] = sorted(days) if days else list(range(7))
+                u["habits"].append(habit)
+                u["next_id"] += 1
+                tl = ",".join(habit["times"]) if habit["times"] else "без времени"
+                added.append(f"{habit['emoji']} {name} — ⏰{tl}")
+            save(data)
+            user_state.pop(uid, None)
+            reschedule(ctx.application, uid, u["habits"])
+            summary = f"Добавлено привычек: {len(added)}\n\n" + "\n".join(added)
+            if skipped:
+                summary += "\n\nНе разобрал:\n" + "\n".join(skipped)
+            await update.message.reply_text(summary)
+            await update.message.reply_text(
+                main_text(u["habits"]),
+                reply_markup=habits_keyboard(u["habits"]),
+                parse_mode="Markdown"
+            )
+            return
+
         name, times, days = parse_add_input(text)
         if not name:
             await update.message.reply_text("Не разобрал название. Напиши ещё раз, например: `Отжимания 07:30 будни`", parse_mode="Markdown")
@@ -769,6 +808,19 @@ def valid_time(t):
         h, m = t.split(":")
         return 0 <= int(h) <= 23 and 0 <= int(m) <= 59
     except: return False
+
+def split_bulk_input(text):
+    """Разбивает текст на несколько привычек по новой строке, точке с запятой или точке."""
+    if "\n" in text:
+        parts = text.split("\n")
+    elif ";" in text:
+        parts = text.split(";")
+    elif "." in text:
+        parts = text.split(".")
+    else:
+        return None
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts if len(parts) > 1 else None
 
 def parse_add_input(text):
     """Разбирает текст на название, список времён (если есть) и дни недели (если указаны)."""
