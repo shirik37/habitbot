@@ -32,7 +32,52 @@ def ensure_habit_fields(h):
     h.setdefault("history", [])
     h.setdefault("track_number", False)
     h.setdefault("counts", {})
+    h.setdefault("days", list(range(7)))
     return h
+
+DAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+
+def days_label(days):
+    """Короткая метка дней для списка привычек."""
+    if not days or len(days) == 7:
+        return ""
+    selected = sorted(days)
+    if selected == [0, 1, 2, 3, 4]:
+        return "  (будни)"
+    if selected == [5, 6]:
+        return "  (вых.)"
+    return "  (" + ",".join(DAY_NAMES[i] for i in selected) + ")"
+
+def days_full_label(days):
+    """Полная метка дней для экрана настроек."""
+    if not days or len(days) == 7:
+        return "Каждый день"
+    selected = sorted(days)
+    if selected == [0, 1, 2, 3, 4]:
+        return "Будни (Пн-Пт)"
+    if selected == [5, 6]:
+        return "Выходные (Сб-Вс)"
+    return ", ".join(DAY_NAMES[i] for i in selected)
+
+def build_days_keyboard(selected, mode, hid=None):
+    """Клавиатура выбора дней недели. mode: 'add' или 'edit'."""
+    rows = []
+    row = []
+    for i, name in enumerate(DAY_NAMES):
+        mark = "✅" if i in selected else "▫️"
+        cb = f"adddays:toggle:{i}" if mode == "add" else f"editdays:toggle:{hid}:{i}"
+        row.append(InlineKeyboardButton(f"{mark}{name}", callback_data=cb))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    quick_row = []
+    for label, qtype in [("Будни", "weekdays"), ("Выходные", "weekend"), ("Каждый день", "all")]:
+        cb = f"adddays:quick:{qtype}" if mode == "add" else f"editdays:quick:{hid}:{qtype}"
+        quick_row.append(InlineKeyboardButton(label, callback_data=cb))
+    rows.append(quick_row)
+    done_cb = "adddays:done" if mode == "add" else f"editdays:done:{hid}"
+    rows.append([InlineKeyboardButton("Готово ✅", callback_data=done_cb)])
+    return InlineKeyboardMarkup(rows)
 
 def today_str():
     return date.today().isoformat()
@@ -113,7 +158,7 @@ def habits_keyboard(habits):
         streak = compute_streak(h.get("history", []))
         streak_str = f"  🔥{streak}" if streak > 0 else ""
         rows.append([InlineKeyboardButton(
-            f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else "") + streak_str,
+            f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else "") + streak_str + days_label(h.get("days")),
             callback_data=f"toggle:{h['id']}"
         )])
     rows.append([
@@ -138,6 +183,7 @@ def edit_keyboard(h):
     rows = [
         [InlineKeyboardButton("✏️ Переименовать", callback_data=f"rename:{h['id']}")],
         [InlineKeyboardButton("⏰ Изменить время", callback_data=f"settime:{h['id']}")],
+        [InlineKeyboardButton("📅 Дни недели", callback_data=f"editdays:start:{h['id']}")],
         [InlineKeyboardButton("😀 Сменить смайлик", callback_data=f"setemoji:{h['id']}")],
         [InlineKeyboardButton(count_label, callback_data=f"togglecount:{h['id']}")],
         [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete:{h['id']}")],
@@ -280,7 +326,8 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if h:
             time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
-            await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
+            days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
+            await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
 
     # Добавить привычку
     elif cb == "add":
@@ -310,9 +357,11 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         hid = int(cb.split(":")[1])
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if not h: return
+        ensure_habit_fields(h)
         time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+        days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
         await q.edit_message_text(
-            f"{h['emoji']} *{h['name']}*\n{time_str}",
+            f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}",
             reply_markup=edit_keyboard(h),
             parse_mode="Markdown"
         )
@@ -352,8 +401,109 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save(data)
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if h:
+            ensure_habit_fields(h)
             time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
-            await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
+            days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
+            await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
+
+    # Выбор дней недели — начать
+    elif cb.startswith("editdays:start:"):
+        hid = int(cb.split(":")[2])
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if not h: return
+        ensure_habit_fields(h)
+        selected = set(h.get("days", list(range(7))))
+        user_state[uid] = {"action": "choosing_days_edit", "hid": hid, "days": selected}
+        await q.edit_message_text(
+            f"📅 В какие дни напоминать про «{h['name']}»?\n\nНажимай на дни, чтобы включить/выключить:",
+            reply_markup=build_days_keyboard(selected, "edit", hid)
+        )
+
+    # Выбор дней недели — изменение (toggle/quick/done)
+    elif cb.startswith("editdays:"):
+        parts = cb.split(":")
+        subcmd = parts[1]
+        hid = int(parts[2])
+        state = user_state.get(uid)
+        if not state or state.get("action") != "choosing_days_edit":
+            await q.answer("Сессия истекла, зайди в настройки заново", show_alert=True)
+            return
+        days = set(state.get("days", range(7)))
+        if subcmd == "toggle":
+            day = int(parts[3])
+            if day in days: days.discard(day)
+            else: days.add(day)
+        elif subcmd == "quick":
+            qtype = parts[3]
+            if qtype == "weekdays": days = {0, 1, 2, 3, 4}
+            elif qtype == "weekend": days = {5, 6}
+            elif qtype == "all": days = set(range(7))
+        elif subcmd == "done":
+            if not days:
+                await q.answer("Выбери хотя бы один день!", show_alert=True)
+                return
+            h = next((x for x in u["habits"] if x["id"] == hid), None)
+            if h:
+                h["days"] = sorted(days)
+                save(data)
+                reschedule(ctx.application, uid, u["habits"])
+                user_state.pop(uid, None)
+                time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+                days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
+                await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
+            return
+        state["days"] = days
+        user_state[uid] = state
+        await q.edit_message_text(
+            "📅 В какие дни напоминать?\n\nНажимай на дни, чтобы включить/выключить:",
+            reply_markup=build_days_keyboard(days, "edit", hid)
+        )
+
+    # Выбор дней недели при добавлении привычки
+    elif cb.startswith("adddays:"):
+        parts = cb.split(":")
+        subcmd = parts[1]
+        state = user_state.get(uid)
+        if not state or state.get("action") != "choosing_days_add":
+            await q.answer("Сессия истекла, начни заново через ➕", show_alert=True)
+            return
+        days = set(state.get("days", range(7)))
+        if subcmd == "toggle":
+            day = int(parts[2])
+            if day in days: days.discard(day)
+            else: days.add(day)
+        elif subcmd == "quick":
+            qtype = parts[2]
+            if qtype == "weekdays": days = {0, 1, 2, 3, 4}
+            elif qtype == "weekend": days = {5, 6}
+            elif qtype == "all": days = set(range(7))
+        elif subcmd == "done":
+            if not days:
+                await q.answer("Выбери хотя бы один день!", show_alert=True)
+                return
+            habit = {
+                "id": u["next_id"],
+                "name": state["name"],
+                "emoji": state.get("emoji", "✅"),
+                "time": state.get("time", ""),
+                "done": False,
+                "days": sorted(days),
+            }
+            ensure_habit_fields(habit)
+            habit["days"] = sorted(days)
+            u["habits"].append(habit)
+            u["next_id"] += 1
+            save(data)
+            user_state.pop(uid, None)
+            reschedule(ctx.application, uid, u["habits"])
+            await q.edit_message_text(main_text(u["habits"]), reply_markup=habits_keyboard(u["habits"]), parse_mode="Markdown")
+            return
+        state["days"] = days
+        user_state[uid] = state
+        await q.edit_message_text(
+            "📅 В какие дни напоминать?\n\nНажимай на дни, чтобы включить/выключить:",
+            reply_markup=build_days_keyboard(days, "add")
+        )
 
 async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
@@ -369,22 +519,11 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if state["action"] == "add":
         name, time_str = parse_name_and_time(text)
         if time_str:
-            # Название и время указаны сразу
-            habit = {
-                "id": u["next_id"],
-                "name": name,
-                "emoji": "✅",
-                "time": time_str,
-                "done": False
-            }
-            u["habits"].append(habit)
-            u["next_id"] += 1
-            save(data)
-            user_state.pop(uid, None)
-            reschedule(ctx.application, uid, u["habits"])
+            # Название и время указаны сразу — переходим к выбору дней
+            user_state[uid] = {"action": "choosing_days_add", "name": name, "emoji": "✅", "time": time_str, "days": set(range(7))}
             await update.message.reply_text(
-                main_text(u["habits"]),
-                reply_markup=habits_keyboard(u["habits"]),
+                f"Привычка: *{name}* ⏰ {time_str}\n\n📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
+                reply_markup=build_days_keyboard(set(range(7)), "add"),
                 parse_mode="Markdown"
             )
         else:
@@ -400,21 +539,11 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if t and not valid_time(t):
             await update.message.reply_text("Неверный формат. Введи время как `07:30` или `-` если не нужно:", parse_mode="Markdown")
             return
-        habit = {
-            "id": u["next_id"],
-            "name": state["name"],
-            "emoji": "✅",
-            "time": t,
-            "done": False
-        }
-        u["habits"].append(habit)
-        u["next_id"] += 1
-        save(data)
-        user_state.pop(uid, None)
-        reschedule(ctx.application, uid, u["habits"])
+        # Переходим к выбору дней
+        user_state[uid] = {"action": "choosing_days_add", "name": state["name"], "emoji": "✅", "time": t, "days": set(range(7))}
         await update.message.reply_text(
-            main_text(u["habits"]),
-            reply_markup=habits_keyboard(u["habits"]),
+            "📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
+            reply_markup=build_days_keyboard(set(range(7)), "add"),
             parse_mode="Markdown"
         )
 
@@ -493,10 +622,15 @@ def reschedule(app, uid, habits):
         if h.get("time"):
             try:
                 hh, mm = map(int, h["time"].split(":"))
+                days = h.get("days")
+                if not days or len(days) == 7:
+                    dow = "*"
+                else:
+                    dow = ",".join(str(d) for d in sorted(days))
                 scheduler.add_job(
                     send_reminder,
                     trigger="cron",
-                    hour=hh, minute=mm,
+                    hour=hh, minute=mm, day_of_week=dow,
                     args=[app, uid, h["id"]],
                     id=f"habit_{uid}_{h['id']}",
                     replace_existing=True
