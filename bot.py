@@ -63,7 +63,8 @@ EMOJIS = ["💪","💧","🏃","📚","🧘","🥗","😴","✍️","🌿","🛁
 
 def habits_keyboard(habits):
     rows = []
-    for h in habits:
+    sorted_habits = sorted(habits, key=lambda h: h["time"] if h.get("time") else "99:99")
+    for h in sorted_habits:
         check = "✅" if h["done"] else "⬜"
         rows.append([InlineKeyboardButton(
             f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else ""),
@@ -77,7 +78,8 @@ def habits_keyboard(habits):
 
 def settings_keyboard(habits):
     rows = []
-    for h in habits:
+    sorted_habits = sorted(habits, key=lambda h: h["time"] if h.get("time") else "99:99")
+    for h in sorted_habits:
         rows.append([InlineKeyboardButton(
             f"{h['emoji']} {h['name']}", callback_data=f"edit:{h['id']}"
         )])
