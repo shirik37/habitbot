@@ -167,10 +167,10 @@ def habits_keyboard(habits):
     for h in sorted_habits:
         check = "✅" if h["done"] else "⬜"
         streak = compute_streak(h.get("history", []))
-        streak_str = f"  🔥{streak}" if streak > 0 else ""
+        streak_str = f" 🔥{streak}" if streak > 0 else ""
         rows.append([
             InlineKeyboardButton(
-                f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else "") + streak_str + days_label(h.get("days")),
+                f"{check} {h['emoji']} {h['name']}" + (f" ⏰{h['time']}" if h.get('time') else "") + streak_str,
                 callback_data=f"toggle:{h['id']}"
             ),
             InlineKeyboardButton("✏️", callback_data=f"quickedit:{h['id']}")
