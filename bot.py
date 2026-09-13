@@ -33,7 +33,37 @@ def ensure_habit_fields(h):
     h.setdefault("track_number", False)
     h.setdefault("counts", {})
     h.setdefault("days", list(range(7)))
+    if "times" not in h:
+        old_time = h.get("time")
+        h["times"] = [old_time] if old_time else []
     return h
+
+def times_label(h):
+    """Короткая метка времени/времён для отображения."""
+    times = h.get("times") or []
+    if not times:
+        return ""
+    return ",".join(sorted(times))
+
+def times_full_label(h):
+    times = h.get("times") or []
+    if not times:
+        return "не задано"
+    return ", ".join(sorted(times))
+
+def parse_times_list(text):
+    """Разбирает текст на список времён (для settime/add_time шагов, где весь текст — время)."""
+    text = text.strip()
+    if text == "-":
+        return []
+    parts = re.split(r'[,\s]+', text)
+    times = []
+    for p in parts:
+        if not p: continue
+        if not valid_time(p):
+            return None
+        times.append(p)
+    return times if times else None
 
 DAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 
@@ -163,16 +193,20 @@ def todays_habits(habits):
 def habits_keyboard(habits):
     rows = []
     today = todays_habits(habits)
-    sorted_habits = sorted(today, key=lambda h: h["time"] if h.get("time") else "99:99")
+    sorted_habits = sorted(today, key=lambda h: (h.get("times") or ["99:99"])[0])
     for h in sorted_habits:
         check = "✅" if h["done"] else "⬜"
         streak = compute_streak(h.get("history", []))
         streak_str = f" 🔥{streak}" if streak > 0 else ""
+        tl = times_label(h)
         rows.append([InlineKeyboardButton(
-            f"{check} {h['emoji']} {h['name']}" + (f" ⏰{h['time']}" if h.get('time') else "") + streak_str,
+            f"{check} {h['emoji']} {h['name']}" + (f" ⏰{tl}" if tl else "") + streak_str,
             callback_data=f"toggle:{h['id']}"
         )])
-        rows.append([InlineKeyboardButton("✏️ Изменить", callback_data=f"quickedit:{h['id']}")])
+        rows.append([
+            InlineKeyboardButton("✏️ Изменить", callback_data=f"quickedit:{h['id']}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"quickdelete:{h['id']}")
+        ])
     rows.append([
         InlineKeyboardButton("➕ Добавить", callback_data="add"),
         InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
@@ -182,7 +216,7 @@ def habits_keyboard(habits):
 
 def settings_keyboard(habits):
     rows = []
-    sorted_habits = sorted(habits, key=lambda h: h["time"] if h.get("time") else "99:99")
+    sorted_habits = sorted(habits, key=lambda h: (h.get("times") or ["99:99"])[0])
     for h in sorted_habits:
         rows.append([InlineKeyboardButton(
             f"{h['emoji']} {h['name']}", callback_data=f"edit:{h['id']}"
@@ -194,7 +228,7 @@ def edit_keyboard(h):
     count_label = "🔢 Считать число: Вкл ✓" if h.get("track_number") else "🔢 Считать число: Выкл"
     rows = [
         [InlineKeyboardButton("✏️ Переименовать", callback_data=f"rename:{h['id']}")],
-        [InlineKeyboardButton("⏰ Изменить время", callback_data=f"settime:{h['id']}")],
+        [InlineKeyboardButton("⏰ Изменить время(на)", callback_data=f"settime:{h['id']}")],
         [InlineKeyboardButton("📅 Дни недели", callback_data=f"editdays:start:{h['id']}")],
         [InlineKeyboardButton("😀 Сменить смайлик", callback_data=f"setemoji:{h['id']}")],
         [InlineKeyboardButton(count_label, callback_data=f"togglecount:{h['id']}")],
@@ -341,9 +375,30 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save(data)
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if h:
-            time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+            time_str = f"⏰ Время: {times_full_label(h)}"
             days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
             await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
+
+    # Быстрое удаление — запрос подтверждения
+    elif cb.startswith("quickdelete:"):
+        hid = int(cb.split(":")[1])
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if not h: return
+        await q.edit_message_text(
+            f"Удалить привычку «{h['emoji']} {h['name']}»?\n\nЭто действие нельзя отменить.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Да, удалить", callback_data=f"quickdeleteconfirm:{hid}"),
+                InlineKeyboardButton("Отмена", callback_data="back"),
+            ]])
+        )
+
+    # Быстрое удаление — подтверждено
+    elif cb.startswith("quickdeleteconfirm:"):
+        hid = int(cb.split(":")[1])
+        u["habits"] = [x for x in u["habits"] if x["id"] != hid]
+        save(data)
+        reschedule(ctx.application, uid, u["habits"])
+        await q.edit_message_text(main_text(u["habits"]), reply_markup=habits_keyboard(u["habits"]), parse_mode="Markdown")
 
     # Быстрое редактирование — название и время одной строкой
     elif cb.startswith("quickedit:"):
@@ -352,12 +407,14 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not h: return
         ensure_habit_fields(h)
         user_state[uid] = {"action": "quick_edit", "hid": hid}
-        cur_time = f" ⏰ {h['time']}" if h.get("time") else ""
+        cur_time = f" ⏰ {times_full_label(h)}" if h.get("times") else ""
         await q.edit_message_text(
             f"{h['emoji']} *{h['name']}*{cur_time}\n\n"
             "Напиши новое название и время одной строкой:\n"
             "*Отжимания 08:00*\n\n"
-            "Можно и с днями:\n"
+            "Можно несколько времён:\n"
+            "*Отжимания 09:00 18:00*\n\n"
+            "И с днями:\n"
             "*Отжимания 08:00 будни*\n\n"
             "Если время менять не нужно — просто напиши название.",
             parse_mode="Markdown"
@@ -370,8 +427,8 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Как называется привычка?\n\n"
             "Можешь сразу указать всё одной строкой:\n"
             "*Отжимания 07:30 будни*\n"
-            "*Йога 19:00 вт,чт*\n"
-            "*Уборка 12:00 выходные*\n\n"
+            "*Отжимания 09:00 18:00* (несколько времён)\n"
+            "*Йога 19:00 вт,чт*\n\n"
             "Или просто название — время и дни спрошу отдельно:\n"
             "*Выпить воду*",
             parse_mode="Markdown"
@@ -394,7 +451,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if not h: return
         ensure_habit_fields(h)
-        time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+        time_str = f"⏰ Время: {times_full_label(h)}"
         days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
         await q.edit_message_text(
             f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}",
@@ -420,7 +477,13 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif cb.startswith("settime:"):
         hid = int(cb.split(":")[1])
         user_state[uid] = {"action": "settime", "hid": hid}
-        await q.edit_message_text("Введи время напоминания в формате *ЧЧ:ММ*\nНапример: `07:30` или `21:00`\n\nЧтобы убрать напоминание — отправь `-`", parse_mode="Markdown")
+        await q.edit_message_text(
+            "Введи время(на) напоминания в формате *ЧЧ:ММ*\n"
+            "Одно время: `07:30`\n"
+            "Несколько через пробел: `09:00 18:00`\n\n"
+            "Чтобы убрать все напоминания — отправь `-`",
+            parse_mode="Markdown"
+        )
 
     # Выбор смайлика — показать панель
     elif cb.startswith("setemoji:"):
@@ -438,7 +501,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if h:
             ensure_habit_fields(h)
-            time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+            time_str = f"⏰ Время: {times_full_label(h)}"
             days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
             await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
 
@@ -484,7 +547,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 save(data)
                 reschedule(ctx.application, uid, u["habits"])
                 user_state.pop(uid, None)
-                time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+                time_str = f"⏰ Время: {times_full_label(h)}"
                 days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
                 await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
             return
@@ -521,7 +584,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "id": u["next_id"],
                 "name": state["name"],
                 "emoji": state.get("emoji", "✅"),
-                "time": state.get("time", ""),
+                "times": state.get("times", []),
                 "done": False,
                 "days": sorted(days),
             }
@@ -553,17 +616,17 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = get_user(data, uid)
 
     if state["action"] == "add":
-        name, time_str, days = parse_add_input(text)
+        name, times, days = parse_add_input(text)
         if not name:
             await update.message.reply_text("Не разобрал название. Напиши ещё раз, например: `Отжимания 07:30 будни`", parse_mode="Markdown")
             return
-        if time_str and days:
+        if times and days:
             # Всё указано сразу — создаём привычку
             habit = {
                 "id": u["next_id"],
                 "name": name,
                 "emoji": "✅",
-                "time": time_str,
+                "times": times,
                 "done": False,
                 "days": sorted(days),
             }
@@ -579,11 +642,11 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 reply_markup=habits_keyboard(u["habits"]),
                 parse_mode="Markdown"
             )
-        elif time_str:
+        elif times:
             # Время есть, дней нет — спрашиваем через клавиатуру
-            user_state[uid] = {"action": "choosing_days_add", "name": name, "emoji": "✅", "time": time_str, "days": set(range(7))}
+            user_state[uid] = {"action": "choosing_days_add", "name": name, "emoji": "✅", "times": times, "days": set(range(7))}
             await update.message.reply_text(
-                f"Привычка: *{name}* ⏰ {time_str}\n\n📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
+                f"Привычка: *{name}* ⏰ {','.join(times)}\n\n📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
                 reply_markup=build_days_keyboard(set(range(7)), "add"),
                 parse_mode="Markdown"
             )
@@ -591,14 +654,14 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Время не указано — спрашиваем отдельно, дни (если были) запоминаем
             user_state[uid] = {"action": "add_time", "name": name, "emoji": "✅", "pending_days": days}
             await update.message.reply_text(
-                f"Привычка: *{name}*\n\nТеперь введи время напоминания в формате *ЧЧ:ММ*\nНапример: `07:30`\n\nЕсли напоминание не нужно — отправь `-`",
+                f"Привычка: *{name}*\n\nТеперь введи время(на) напоминания в формате *ЧЧ:ММ*\nОдно: `07:30`\nНесколько через пробел: `09:00 18:00`\n\nЕсли напоминание не нужно — отправь `-`",
                 parse_mode="Markdown"
             )
 
     elif state["action"] == "add_time":
-        t = text if text != "-" else ""
-        if t and not valid_time(t):
-            await update.message.reply_text("Неверный формат. Введи время как `07:30` или `-` если не нужно:", parse_mode="Markdown")
+        times = parse_times_list(text)
+        if times is None:
+            await update.message.reply_text("Неверный формат. Введи время как `07:30` (или несколько через пробел), либо `-` если не нужно:", parse_mode="Markdown")
             return
         pending_days = state.get("pending_days")
         if pending_days:
@@ -607,7 +670,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "id": u["next_id"],
                 "name": state["name"],
                 "emoji": "✅",
-                "time": t,
+                "times": times,
                 "done": False,
                 "days": sorted(pending_days),
             }
@@ -625,7 +688,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Дней ещё нет — переходим к выбору
-            user_state[uid] = {"action": "choosing_days_add", "name": state["name"], "emoji": "✅", "time": t, "days": set(range(7))}
+            user_state[uid] = {"action": "choosing_days_add", "name": state["name"], "emoji": "✅", "times": times, "days": set(range(7))}
             await update.message.reply_text(
                 "📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
                 reply_markup=build_days_keyboard(set(range(7)), "add"),
@@ -662,13 +725,13 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not h:
             user_state.pop(uid, None)
             return
-        name, time_str, days = parse_add_input(text)
+        name, times, days = parse_add_input(text)
         if not name:
             await update.message.reply_text("Не разобрал название. Попробуй ещё раз, например: `Отжимания 08:00`", parse_mode="Markdown")
             return
         h["name"] = name
-        if time_str is not None:
-            h["time"] = time_str
+        if times is not None:
+            h["times"] = times
         if days is not None:
             h["days"] = sorted(days)
         save(data)
@@ -690,12 +753,12 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif state["action"] == "settime":
         hid = state["hid"]
-        t = text if text != "-" else ""
-        if t and not valid_time(t):
-            await update.message.reply_text("Неверный формат. Введи время как `07:30` или `-` чтобы убрать:", parse_mode="Markdown")
+        times = parse_times_list(text)
+        if times is None:
+            await update.message.reply_text("Неверный формат. Введи время как `07:30` (или несколько через пробел), либо `-` чтобы убрать:", parse_mode="Markdown")
             return
         for h in u["habits"]:
-            if h["id"] == hid: h["time"] = t; break
+            if h["id"] == hid: h["times"] = times; break
         save(data)
         user_state.pop(uid, None)
         reschedule(ctx.application, uid, u["habits"])
@@ -708,16 +771,15 @@ def valid_time(t):
     except: return False
 
 def parse_add_input(text):
-    """Разбирает текст на название, время (если есть) и дни недели (если указаны)."""
+    """Разбирает текст на название, список времён (если есть) и дни недели (если указаны)."""
     days = None
+    times = []
 
-    time_match = re.search(r'\b(\d{1,2}):(\d{2})\b', text)
-    time_str = None
-    if time_match:
-        candidate = f"{int(time_match.group(1)):02d}:{time_match.group(2)}"
+    for m in reversed(list(re.finditer(r'\b(\d{1,2}):(\d{2})\b', text))):
+        candidate = f"{int(m.group(1)):02d}:{m.group(2)}"
         if valid_time(candidate):
-            time_str = candidate
-            text = text[:time_match.start()] + text[time_match.end():]
+            times.insert(0, candidate)
+            text = text[:m.start()] + text[m.end():]
 
     if re.search(r'\bбудни\b', text, re.IGNORECASE):
         days = {0, 1, 2, 3, 4}
@@ -736,7 +798,7 @@ def parse_add_input(text):
             text = re.sub(r'\b(пн|вт|ср|чт|пт|сб|вс)\b[,\s]*', '', text, flags=re.IGNORECASE)
 
     name = re.sub(r'[,\s]+', ' ', text).strip(" ,-")
-    return name, time_str, days
+    return name, (sorted(set(times)) if times else None), days
 
 # ─── Планировщик уведомлений ──────────────────────────────────────────────────
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
@@ -748,20 +810,21 @@ def reschedule(app, uid, habits):
             job.remove()
     # Добавляем новые
     for h in habits:
-        if h.get("time"):
+        times = h.get("times") or []
+        days = h.get("days")
+        if not days or len(days) == 7:
+            dow = "*"
+        else:
+            dow = ",".join(str(d) for d in sorted(days))
+        for idx, t in enumerate(times):
             try:
-                hh, mm = map(int, h["time"].split(":"))
-                days = h.get("days")
-                if not days or len(days) == 7:
-                    dow = "*"
-                else:
-                    dow = ",".join(str(d) for d in sorted(days))
+                hh, mm = map(int, t.split(":"))
                 scheduler.add_job(
                     send_reminder,
                     trigger="cron",
                     hour=hh, minute=mm, day_of_week=dow,
                     args=[app, uid, h["id"]],
-                    id=f"habit_{uid}_{h['id']}",
+                    id=f"habit_{uid}_{h['id']}_{idx}",
                     replace_existing=True
                 )
             except: pass
