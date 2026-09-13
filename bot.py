@@ -341,18 +341,18 @@ def restore_jobs(app):
     for uid, u in data.items():
         reschedule(app, uid, u["habits"])
 
+async def on_startup(app):
+    restore_jobs(app)
+
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(on_startup).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
     scheduler.add_job(midnight_reset, "cron", hour=0, minute=0, args=[app], id="midnight")
     scheduler.start()
-
-    app.job_queue  # init
-    app.post_init = lambda a: restore_jobs(a)
 
     logging.info("Bot started")
     app.run_polling(drop_pending_updates=True)
