@@ -1,5 +1,5 @@
 import os, json, random, logging, re
-from datetime import time as dtime
+from datetime import time as dtime, date, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -26,6 +26,50 @@ def get_user(data, uid):
     if uid not in data:
         data[uid] = {"habits": [], "next_id": 1}
     return data[uid]
+
+def ensure_habit_fields(h):
+    """Добавляет новые поля к старым привычкам, если их ещё нет."""
+    h.setdefault("history", [])
+    h.setdefault("track_number", False)
+    h.setdefault("counts", {})
+    return h
+
+def today_str():
+    return date.today().isoformat()
+
+def mark_done_today(h, value=None):
+    t = today_str()
+    if t not in h["history"]:
+        h["history"].append(t)
+    if value is not None:
+        h["counts"][t] = value
+
+def unmark_today(h):
+    t = today_str()
+    if t in h["history"]:
+        h["history"].remove(t)
+    h["counts"].pop(t, None)
+
+def compute_streak(history):
+    dates_set = set(history)
+    d = date.today()
+    if d.isoformat() not in dates_set:
+        d -= timedelta(days=1)
+    streak = 0
+    while d.isoformat() in dates_set:
+        streak += 1
+        d -= timedelta(days=1)
+    return streak
+
+def week_completion(history):
+    """Сколько раз выполнено за последние 7 дней."""
+    dates_set = set(history)
+    count = 0
+    for i in range(7):
+        d = (date.today() - timedelta(days=i)).isoformat()
+        if d in dates_set:
+            count += 1
+    return count
 
 # ─── Тексты ───────────────────────────────────────────────────────────────────
 PRAISE = [
@@ -66,14 +110,17 @@ def habits_keyboard(habits):
     sorted_habits = sorted(habits, key=lambda h: h["time"] if h.get("time") else "99:99")
     for h in sorted_habits:
         check = "✅" if h["done"] else "⬜"
+        streak = compute_streak(h.get("history", []))
+        streak_str = f"  🔥{streak}" if streak > 0 else ""
         rows.append([InlineKeyboardButton(
-            f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else ""),
+            f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else "") + streak_str,
             callback_data=f"toggle:{h['id']}"
         )])
     rows.append([
         InlineKeyboardButton("➕ Добавить", callback_data="add"),
         InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
     ])
+    rows.append([InlineKeyboardButton("📊 Статистика", callback_data="stats")])
     return InlineKeyboardMarkup(rows)
 
 def settings_keyboard(habits):
@@ -87,10 +134,12 @@ def settings_keyboard(habits):
     return InlineKeyboardMarkup(rows)
 
 def edit_keyboard(h):
+    count_label = "🔢 Считать число: Вкл ✓" if h.get("track_number") else "🔢 Считать число: Выкл"
     rows = [
         [InlineKeyboardButton("✏️ Переименовать", callback_data=f"rename:{h['id']}")],
         [InlineKeyboardButton("⏰ Изменить время", callback_data=f"settime:{h['id']}")],
         [InlineKeyboardButton("😀 Сменить смайлик", callback_data=f"setemoji:{h['id']}")],
+        [InlineKeyboardButton(count_label, callback_data=f"togglecount:{h['id']}")],
         [InlineKeyboardButton("🗑 Удалить", callback_data=f"delete:{h['id']}")],
         [InlineKeyboardButton("« Назад", callback_data="settings")],
     ]
@@ -121,6 +170,23 @@ def progress_text(habits):
 def main_text(habits):
     return f"📋 *Мои привычки*\n\n{progress_text(habits)}"
 
+def stats_text(habits):
+    if not habits:
+        return "📊 *Статистика*\n\nПока нет привычек для статистики."
+    lines = ["📊 *Статистика*\n"]
+    total_week = 0
+    max_possible = len(habits) * 7
+    for h in sorted(habits, key=lambda x: -compute_streak(x.get("history", []))):
+        streak = compute_streak(h.get("history", []))
+        week = week_completion(h.get("history", []))
+        total_week += week
+        streak_part = f"🔥{streak}" if streak > 0 else "—"
+        lines.append(f"{h['emoji']} {h['name']}: {week}/7 за неделю, стрик {streak_part}")
+    if max_possible > 0:
+        pct = int(total_week / max_possible * 100)
+        lines.append(f"\nОбщий результат за неделю: {pct}%")
+    return "\n".join(lines)
+
 # ─── Состояния диалога ────────────────────────────────────────────────────────
 WAITING_NAME, WAITING_TIME, WAITING_RENAME, WAITING_NEW_TIME = range(4)
 user_state = {}  # uid -> {action, habit_id}
@@ -129,10 +195,24 @@ user_state = {}  # uid -> {action, habit_id}
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = load()
     u = get_user(data, update.effective_user.id)
+    for h in u["habits"]:
+        ensure_habit_fields(h)
     save(data)
     await update.message.reply_text(
         main_text(u["habits"]),
         reply_markup=habits_keyboard(u["habits"]),
+        parse_mode="Markdown"
+    )
+
+async def stats_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    data = load()
+    u = get_user(data, update.effective_user.id)
+    for h in u["habits"]:
+        ensure_habit_fields(h)
+    save(data)
+    await update.message.reply_text(
+        stats_text(u["habits"]),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Назад", callback_data="back")]]),
         parse_mode="Markdown"
     )
 
@@ -147,11 +227,30 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Отметить / снять привычку
     if cb.startswith("toggle:"):
         hid = int(cb.split(":")[1])
-        for h in u["habits"]:
-            if h["id"] == hid:
-                h["done"] = not h["done"]
-                praise = random.choice(PRAISE) if h["done"] else None
-                break
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if not h: return
+        ensure_habit_fields(h)
+
+        if not h["done"] and h.get("track_number"):
+            # Спрашиваем число перед тем как отметить выполненной
+            user_state[uid] = {"action": "enter_count", "hid": hid}
+            save(data)
+            await q.edit_message_text(
+                f"{h['emoji']} *{h['name']}*\n\nСколько раз/повторений? Введи число:",
+                parse_mode="Markdown"
+            )
+            return
+
+        h["done"] = not h["done"]
+        praise = None
+        if h["done"]:
+            mark_done_today(h)
+            praise = random.choice(PRAISE)
+            streak = compute_streak(h["history"])
+            if streak > 1:
+                praise += f"\n🔥 Стрик: {streak} {'день' if streak==1 else 'дня' if streak<5 else 'дней'} подряд!"
+        else:
+            unmark_today(h)
         save(data)
         await q.edit_message_text(
             main_text(u["habits"]),
@@ -160,6 +259,28 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         if praise:
             await ctx.bot.send_message(chat_id=q.message.chat_id, text=praise)
+
+    # Статистика
+    elif cb == "stats":
+        await q.edit_message_text(
+            stats_text(u["habits"]),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Назад", callback_data="back")]]),
+            parse_mode="Markdown"
+        )
+
+    # Переключить учёт числа
+    elif cb.startswith("togglecount:"):
+        hid = int(cb.split(":")[1])
+        for h in u["habits"]:
+            if h["id"] == hid:
+                ensure_habit_fields(h)
+                h["track_number"] = not h["track_number"]
+                break
+        save(data)
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if h:
+            time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
+            await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
 
     # Добавить привычку
     elif cb == "add":
@@ -297,6 +418,30 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+    elif state["action"] == "enter_count":
+        hid = state["hid"]
+        num_match = re.search(r'\d+', text)
+        if not num_match:
+            await update.message.reply_text("Не понял число. Введи просто цифру, например `20`:", parse_mode="Markdown")
+            return
+        value = int(num_match.group())
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if h:
+            h["done"] = True
+            mark_done_today(h, value)
+            save(data)
+            user_state.pop(uid, None)
+            praise = random.choice(PRAISE) + f"\n{h['emoji']} Записано: {value}"
+            streak = compute_streak(h["history"])
+            if streak > 1:
+                praise += f"\n🔥 Стрик: {streak} {'день' if streak==1 else 'дня' if streak<5 else 'дней'} подряд!"
+            await update.message.reply_text(
+                main_text(u["habits"]),
+                reply_markup=habits_keyboard(u["habits"]),
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(praise)
+
     elif state["action"] == "rename":
         hid = state["hid"]
         for h in u["habits"]:
@@ -389,6 +534,7 @@ async def on_startup(app):
 def main():
     app = Application.builder().token(TOKEN).post_init(on_startup).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
