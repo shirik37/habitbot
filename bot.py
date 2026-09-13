@@ -285,7 +285,40 @@ def stats_text(habits):
 
 # ─── Состояния диалога ────────────────────────────────────────────────────────
 WAITING_NAME, WAITING_TIME, WAITING_RENAME, WAITING_NEW_TIME = range(4)
+STATE_FILE = "state.json"
 user_state = {}  # uid -> {action, habit_id}
+
+def load_user_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+    except:
+        raw = {}
+    for uid, st in raw.items():
+        if isinstance(st, dict) and isinstance(st.get("days"), list):
+            st["days"] = set(st["days"])
+    return raw
+
+def save_user_state():
+    serializable = {}
+    for uid, st in user_state.items():
+        st2 = dict(st)
+        if isinstance(st2.get("days"), set):
+            st2["days"] = sorted(st2["days"])
+        serializable[uid] = st2
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(serializable, f, ensure_ascii=False)
+    except Exception as e:
+        logging.error(f"Failed to save state: {e}")
+
+def set_state(uid, value):
+    user_state[uid] = value
+    save_user_state()
+
+def clear_state(uid):
+    user_state.pop(uid, None)
+    save_user_state()
 
 # ─── Хендлеры ─────────────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -329,7 +362,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         if not h["done"] and h.get("track_number"):
             # Спрашиваем число перед тем как отметить выполненной
-            user_state[uid] = {"action": "enter_count", "hid": hid}
+            set_state(uid, {"action": "enter_count", "hid": hid})
             save(data)
             await q.edit_message_text(
                 f"{h['emoji']} *{h['name']}*\n\nСколько раз/повторений? Введи число:",
@@ -406,7 +439,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if not h: return
         ensure_habit_fields(h)
-        user_state[uid] = {"action": "quick_edit", "hid": hid}
+        set_state(uid, {"action": "quick_edit", "hid": hid})
         cur_time = f" ⏰ {times_full_label(h)}" if h.get("times") else ""
         await q.edit_message_text(
             f"{h['emoji']} *{h['name']}*{cur_time}\n\n"
@@ -422,7 +455,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Добавить привычку
     elif cb == "add":
-        user_state[uid] = {"action": "add"}
+        set_state(uid, {"action": "add"})
         await q.edit_message_text(
             "Как называется привычка?\n\n"
             "Можешь сразу указать всё одной строкой:\n"
@@ -472,13 +505,13 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Переименовать
     elif cb.startswith("rename:"):
         hid = int(cb.split(":")[1])
-        user_state[uid] = {"action": "rename", "hid": hid}
+        set_state(uid, {"action": "rename", "hid": hid})
         await q.edit_message_text("Введи новое название:")
 
     # Установить время
     elif cb.startswith("settime:"):
         hid = int(cb.split(":")[1])
-        user_state[uid] = {"action": "settime", "hid": hid}
+        set_state(uid, {"action": "settime", "hid": hid})
         await q.edit_message_text(
             "Введи время(на) напоминания в формате *ЧЧ:ММ*\n"
             "Одно время: `07:30`\n"
@@ -514,7 +547,7 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not h: return
         ensure_habit_fields(h)
         selected = set(h.get("days", list(range(7))))
-        user_state[uid] = {"action": "choosing_days_edit", "hid": hid, "days": selected}
+        set_state(uid, {"action": "choosing_days_edit", "hid": hid, "days": selected})
         await q.edit_message_text(
             f"📅 В какие дни напоминать про «{h['name']}»?\n\nНажимай на дни, чтобы включить/выключить:",
             reply_markup=build_days_keyboard(selected, "edit", hid)
@@ -548,13 +581,13 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 h["days"] = sorted(days)
                 save(data)
                 reschedule(ctx.application, uid, u["habits"])
-                user_state.pop(uid, None)
+                clear_state(uid)
                 time_str = f"⏰ Время: {times_full_label(h)}"
                 days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
                 await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
             return
         state["days"] = days
-        user_state[uid] = state
+        set_state(uid, state)
         await q.edit_message_text(
             "📅 В какие дни напоминать?\n\nНажимай на дни, чтобы включить/выключить:",
             reply_markup=build_days_keyboard(days, "edit", hid)
@@ -595,12 +628,12 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             u["habits"].append(habit)
             u["next_id"] += 1
             save(data)
-            user_state.pop(uid, None)
+            clear_state(uid)
             reschedule(ctx.application, uid, u["habits"])
             await q.edit_message_text(main_text(u["habits"]), reply_markup=habits_keyboard(u["habits"]), parse_mode="Markdown")
             return
         state["days"] = days
-        user_state[uid] = state
+        set_state(uid, state)
         await q.edit_message_text(
             "📅 В какие дни напоминать?\n\nНажимай на дни, чтобы включить/выключить:",
             reply_markup=build_days_keyboard(days, "add")
@@ -642,7 +675,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 tl = ",".join(habit["times"]) if habit["times"] else "без времени"
                 added.append(f"{habit['emoji']} {name} — ⏰{tl}")
             save(data)
-            user_state.pop(uid, None)
+            clear_state(uid)
             reschedule(ctx.application, uid, u["habits"])
             summary = f"Добавлено привычек: {len(added)}\n\n" + "\n".join(added)
             if skipped:
@@ -674,7 +707,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             u["habits"].append(habit)
             u["next_id"] += 1
             save(data)
-            user_state.pop(uid, None)
+            clear_state(uid)
             reschedule(ctx.application, uid, u["habits"])
             await update.message.reply_text(
                 main_text(u["habits"]),
@@ -683,7 +716,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         elif times:
             # Время есть, дней нет — спрашиваем через клавиатуру
-            user_state[uid] = {"action": "choosing_days_add", "name": name, "emoji": "✅", "times": times, "days": set(range(7))}
+            set_state(uid, {"action": "choosing_days_add", "name": name, "emoji": "✅", "times": times, "days": set(range(7))})
             await update.message.reply_text(
                 f"Привычка: *{name}* ⏰ {','.join(times)}\n\n📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
                 reply_markup=build_days_keyboard(set(range(7)), "add"),
@@ -691,7 +724,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Время не указано — спрашиваем отдельно, дни (если были) запоминаем
-            user_state[uid] = {"action": "add_time", "name": name, "emoji": "✅", "pending_days": days}
+            set_state(uid, {"action": "add_time", "name": name, "emoji": "✅", "pending_days": days})
             await update.message.reply_text(
                 f"Привычка: *{name}*\n\nТеперь введи время(на) напоминания в формате *ЧЧ:ММ*\nОдно: `07:30`\nНесколько через пробел: `09:00 18:00`\n\nЕсли напоминание не нужно — отправь `-`",
                 parse_mode="Markdown"
@@ -718,7 +751,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             u["habits"].append(habit)
             u["next_id"] += 1
             save(data)
-            user_state.pop(uid, None)
+            clear_state(uid)
             reschedule(ctx.application, uid, u["habits"])
             await update.message.reply_text(
                 main_text(u["habits"]),
@@ -727,7 +760,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
         else:
             # Дней ещё нет — переходим к выбору
-            user_state[uid] = {"action": "choosing_days_add", "name": state["name"], "emoji": "✅", "times": times, "days": set(range(7))}
+            set_state(uid, {"action": "choosing_days_add", "name": state["name"], "emoji": "✅", "times": times, "days": set(range(7))})
             await update.message.reply_text(
                 "📅 В какие дни напоминать?\n\nПо умолчанию — каждый день. Нажимай на дни, чтобы включить/выключить:",
                 reply_markup=build_days_keyboard(set(range(7)), "add"),
@@ -746,7 +779,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             h["done"] = True
             mark_done_today(h, value)
             save(data)
-            user_state.pop(uid, None)
+            clear_state(uid)
             praise = random.choice(PRAISE) + f"\n{h['emoji']} Записано: {value}"
             streak = compute_streak(h["history"])
             if streak > 1:
@@ -762,7 +795,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         hid = state["hid"]
         h = next((x for x in u["habits"] if x["id"] == hid), None)
         if not h:
-            user_state.pop(uid, None)
+            clear_state(uid)
             return
         name, times, days = parse_add_input(text)
         if not name:
@@ -774,7 +807,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if days is not None:
             h["days"] = sorted(days)
         save(data)
-        user_state.pop(uid, None)
+        clear_state(uid)
         reschedule(ctx.application, uid, u["habits"])
         await update.message.reply_text(
             main_text(u["habits"]),
@@ -787,7 +820,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for h in u["habits"]:
             if h["id"] == hid: h["name"] = text; break
         save(data)
-        user_state.pop(uid, None)
+        clear_state(uid)
         await update.message.reply_text(main_text(u["habits"]), reply_markup=habits_keyboard(u["habits"]), parse_mode="Markdown")
 
     elif state["action"] == "settime":
@@ -799,7 +832,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for h in u["habits"]:
             if h["id"] == hid: h["times"] = times; break
         save(data)
-        user_state.pop(uid, None)
+        clear_state(uid)
         reschedule(ctx.application, uid, u["habits"])
         await update.message.reply_text(main_text(u["habits"]), reply_markup=habits_keyboard(u["habits"]), parse_mode="Markdown")
 
@@ -907,6 +940,8 @@ def restore_jobs(app):
 
 async def on_startup(app):
     restore_jobs(app)
+    global user_state
+    user_state.update(load_user_state())
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 def main():
