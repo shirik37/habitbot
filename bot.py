@@ -157,10 +157,13 @@ def habits_keyboard(habits):
         check = "✅" if h["done"] else "⬜"
         streak = compute_streak(h.get("history", []))
         streak_str = f"  🔥{streak}" if streak > 0 else ""
-        rows.append([InlineKeyboardButton(
-            f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else "") + streak_str + days_label(h.get("days")),
-            callback_data=f"toggle:{h['id']}"
-        )])
+        rows.append([
+            InlineKeyboardButton(
+                f"{check} {h['emoji']} {h['name']}" + (f"  ⏰{h['time']}" if h.get('time') else "") + streak_str + days_label(h.get("days")),
+                callback_data=f"toggle:{h['id']}"
+            ),
+            InlineKeyboardButton("✏️", callback_data=f"quickedit:{h['id']}")
+        ])
     rows.append([
         InlineKeyboardButton("➕ Добавить", callback_data="add"),
         InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
@@ -328,6 +331,24 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             time_str = f"⏰ Время: {h['time']}" if h.get("time") else "⏰ Время: не задано"
             days_str = f"📅 Дни: {days_full_label(h.get('days'))}"
             await q.edit_message_text(f"{h['emoji']} *{h['name']}*\n{time_str}\n{days_str}", reply_markup=edit_keyboard(h), parse_mode="Markdown")
+
+    # Быстрое редактирование — название и время одной строкой
+    elif cb.startswith("quickedit:"):
+        hid = int(cb.split(":")[1])
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if not h: return
+        ensure_habit_fields(h)
+        user_state[uid] = {"action": "quick_edit", "hid": hid}
+        cur_time = f" ⏰ {h['time']}" if h.get("time") else ""
+        await q.edit_message_text(
+            f"{h['emoji']} *{h['name']}*{cur_time}\n\n"
+            "Напиши новое название и время одной строкой:\n"
+            "*Отжимания 08:00*\n\n"
+            "Можно и с днями:\n"
+            "*Отжимания 08:00 будни*\n\n"
+            "Если время менять не нужно — просто напиши название.",
+            parse_mode="Markdown"
+        )
 
     # Добавить привычку
     elif cb == "add":
@@ -621,6 +642,30 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             await update.message.reply_text(praise)
+
+    elif state["action"] == "quick_edit":
+        hid = state["hid"]
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if not h:
+            user_state.pop(uid, None)
+            return
+        name, time_str, days = parse_add_input(text)
+        if not name:
+            await update.message.reply_text("Не разобрал название. Попробуй ещё раз, например: `Отжимания 08:00`", parse_mode="Markdown")
+            return
+        h["name"] = name
+        if time_str is not None:
+            h["time"] = time_str
+        if days is not None:
+            h["days"] = sorted(days)
+        save(data)
+        user_state.pop(uid, None)
+        reschedule(ctx.application, uid, u["habits"])
+        await update.message.reply_text(
+            main_text(u["habits"]),
+            reply_markup=habits_keyboard(u["habits"]),
+            parse_mode="Markdown"
+        )
 
     elif state["action"] == "rename":
         hid = state["hid"]
