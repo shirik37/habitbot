@@ -33,10 +33,26 @@ def ensure_habit_fields(h):
     h.setdefault("track_number", False)
     h.setdefault("counts", {})
     h.setdefault("days", list(range(7)))
+    h.setdefault("done_slots", {})
+    h.setdefault("slot_counts", {})
     if "times" not in h:
         old_time = h.get("time")
         h["times"] = [old_time] if old_time else []
     return h
+
+def get_today_slot_list(h):
+    ds = h.setdefault("done_slots", {})
+    return ds.setdefault(today_str(), [])
+
+def is_slot_done(h, idx):
+    return idx in h.get("done_slots", {}).get(today_str(), [])
+
+def all_slots_done(h):
+    times = h.get("times") or []
+    if not times:
+        return False
+    today_list = h.get("done_slots", {}).get(today_str(), [])
+    return all(i in today_list for i in range(len(times)))
 
 def times_label(h):
     """Короткая метка времени/времён для отображения."""
@@ -195,14 +211,25 @@ def habits_keyboard(habits):
     today = todays_habits(habits)
     sorted_habits = sorted(today, key=lambda h: (h.get("times") or ["99:99"])[0])
     for h in sorted_habits:
-        check = "✅" if h["done"] else "⬜"
+        times = h.get("times") or []
         streak = compute_streak(h.get("history", []))
         streak_str = f" 🔥{streak}" if streak > 0 else ""
-        tl = times_label(h)
-        rows.append([InlineKeyboardButton(
-            f"{check} {h['emoji']} {h['name']}" + (f" ⏰{tl}" if tl else "") + streak_str,
-            callback_data=f"toggle:{h['id']}"
-        )])
+        if len(times) >= 2:
+            for idx, t in enumerate(times):
+                slot_done = is_slot_done(h, idx)
+                check = "✅" if slot_done else "⬜"
+                suffix = streak_str if idx == len(times) - 1 else ""
+                rows.append([InlineKeyboardButton(
+                    f"{check} {h['emoji']} {h['name']} ⏰{t}" + suffix,
+                    callback_data=f"toggleslot:{h['id']}:{idx}"
+                )])
+        else:
+            check = "✅" if h["done"] else "⬜"
+            tl = times_label(h)
+            rows.append([InlineKeyboardButton(
+                f"{check} {h['emoji']} {h['name']}" + (f" ⏰{tl}" if tl else "") + streak_str,
+                callback_data=f"toggle:{h['id']}"
+            )])
         rows.append([
             InlineKeyboardButton("✏️ Изменить", callback_data=f"quickedit:{h['id']}"),
             InlineKeyboardButton("🗑 Удалить", callback_data=f"quickdelete:{h['id']}")
@@ -378,6 +405,53 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             streak = compute_streak(h["history"])
             if streak > 1:
                 praise += f"\n🔥 Стрик: {streak} {'день' if streak==1 else 'дня' if streak<5 else 'дней'} подряд!"
+        else:
+            unmark_today(h)
+        save(data)
+        await q.edit_message_text(
+            main_text(u["habits"]),
+            reply_markup=habits_keyboard(u["habits"]),
+            parse_mode="Markdown"
+        )
+        if praise:
+            await ctx.bot.send_message(chat_id=q.message.chat_id, text=praise)
+
+    # Отметить / снять отдельное время привычки (для привычек с несколькими напоминаниями в день)
+    elif cb.startswith("toggleslot:"):
+        parts = cb.split(":")
+        hid = int(parts[1])
+        idx = int(parts[2])
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if not h: return
+        ensure_habit_fields(h)
+        today_list = get_today_slot_list(h)
+        currently_done = idx in today_list
+        times = h.get("times") or []
+        t = times[idx] if idx < len(times) else ""
+
+        if not currently_done and h.get("track_number"):
+            set_state(uid, {"action": "enter_slot_count", "hid": hid, "idx": idx})
+            save(data)
+            await q.edit_message_text(
+                f"{h['emoji']} *{h['name']}* ⏰{t}\n\nСколько раз/повторений? Введи число:",
+                parse_mode="Markdown"
+            )
+            return
+
+        if currently_done:
+            today_list.remove(idx)
+        else:
+            today_list.append(idx)
+
+        praise = random.choice(PRAISE) if not currently_done else None
+        full_done = all_slots_done(h)
+        h["done"] = full_done
+        if full_done:
+            mark_done_today(h)
+            streak = compute_streak(h["history"])
+            if streak > 1:
+                extra = f"\n🔥 Стрик: {streak} {'день' if streak==1 else 'дня' if streak<5 else 'дней'} подряд!"
+                praise = (praise or "Все отметки на сегодня сделаны! 🎉") + extra
         else:
             unmark_today(h)
         save(data)
@@ -767,6 +841,41 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
 
+    elif state["action"] == "enter_slot_count":
+        hid = state["hid"]
+        idx = state["idx"]
+        num_match = re.search(r'\d+', text)
+        if not num_match:
+            await update.message.reply_text("Не понял число. Введи просто цифру, например `20`:", parse_mode="Markdown")
+            return
+        value = int(num_match.group())
+        h = next((x for x in u["habits"] if x["id"] == hid), None)
+        if h:
+            ensure_habit_fields(h)
+            today_list = get_today_slot_list(h)
+            if idx not in today_list:
+                today_list.append(idx)
+            sc = h.setdefault("slot_counts", {}).setdefault(today_str(), {})
+            sc[str(idx)] = value
+            times = h.get("times") or []
+            t = times[idx] if idx < len(times) else ""
+            praise = random.choice(PRAISE) + f"\n{h['emoji']} {t} — записано: {value}"
+            full_done = all_slots_done(h)
+            h["done"] = full_done
+            if full_done:
+                mark_done_today(h)
+                streak = compute_streak(h["history"])
+                if streak > 1:
+                    praise += f"\n🔥 Стрик: {streak} {'день' if streak==1 else 'дня' if streak<5 else 'дней'} подряд!"
+            save(data)
+            clear_state(uid)
+            await update.message.reply_text(
+                main_text(u["habits"]),
+                reply_markup=habits_keyboard(u["habits"]),
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(praise)
+
     elif state["action"] == "enter_count":
         hid = state["hid"]
         num_match = re.search(r'\d+', text)
@@ -797,6 +906,7 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not h:
             clear_state(uid)
             return
+        ensure_habit_fields(h)
         name, times, days = parse_add_input(text)
         if not name:
             await update.message.reply_text("Не разобрал название. Попробуй ещё раз, например: `Отжимания 08:00`", parse_mode="Markdown")
@@ -804,6 +914,10 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         h["name"] = name
         if times is not None:
             h["times"] = times
+            h["done_slots"] = {}
+            h["slot_counts"] = {}
+            h["done"] = False
+            unmark_today(h)
         if days is not None:
             h["days"] = sorted(days)
         save(data)
@@ -830,7 +944,14 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Неверный формат. Введи время как `07:30` (или несколько через пробел), либо `-` чтобы убрать:", parse_mode="Markdown")
             return
         for h in u["habits"]:
-            if h["id"] == hid: h["times"] = times; break
+            if h["id"] == hid:
+                ensure_habit_fields(h)
+                h["times"] = times
+                h["done_slots"] = {}
+                h["slot_counts"] = {}
+                h["done"] = False
+                unmark_today(h)
+                break
         save(data)
         clear_state(uid)
         reschedule(ctx.application, uid, u["habits"])
@@ -908,18 +1029,26 @@ def reschedule(app, uid, habits):
                     send_reminder,
                     trigger="cron",
                     hour=hh, minute=mm, day_of_week=dow,
-                    args=[app, uid, h["id"]],
+                    args=[app, uid, h["id"], idx],
                     id=f"habit_{uid}_{h['id']}_{idx}",
                     replace_existing=True
                 )
             except: pass
 
-async def send_reminder(app, uid, hid):
+async def send_reminder(app, uid, hid, idx=None):
     data = load()
     u = data.get(str(uid))
     if not u: return
     h = next((x for x in u["habits"] if x["id"] == hid), None)
-    if not h or h["done"]: return
+    if not h: return
+    ensure_habit_fields(h)
+    times = h.get("times") or []
+    if idx is not None and len(times) >= 2:
+        if is_slot_done(h, idx):
+            return
+    else:
+        if h.get("done"):
+            return
     text = f"{h['emoji']} *{h['name']}*\n\n{get_funny(h['name'])}"
     try:
         await app.bot.send_message(chat_id=int(uid), text=text, parse_mode="Markdown")
@@ -928,9 +1057,14 @@ async def send_reminder(app, uid, hid):
 
 async def midnight_reset(app):
     data = load()
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
     for uid, u in data.items():
         for h in u["habits"]:
             h["done"] = False
+            if "done_slots" in h:
+                h["done_slots"] = {d: v for d, v in h["done_slots"].items() if d >= cutoff}
+            if "slot_counts" in h:
+                h["slot_counts"] = {d: v for d, v in h["slot_counts"].items() if d >= cutoff}
     save(data)
 
 def restore_jobs(app):
