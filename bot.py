@@ -168,13 +168,11 @@ def habits_keyboard(habits):
         check = "✅" if h["done"] else "⬜"
         streak = compute_streak(h.get("history", []))
         streak_str = f" 🔥{streak}" if streak > 0 else ""
-        rows.append([
-            InlineKeyboardButton(
-                f"{check} {h['emoji']} {h['name']}" + (f" ⏰{h['time']}" if h.get('time') else "") + streak_str,
-                callback_data=f"toggle:{h['id']}"
-            ),
-            InlineKeyboardButton("✏️", callback_data=f"quickedit:{h['id']}")
-        ])
+        rows.append([InlineKeyboardButton(
+            f"{check} {h['emoji']} {h['name']}" + (f" ⏰{h['time']}" if h.get('time') else "") + streak_str,
+            callback_data=f"toggle:{h['id']}"
+        )])
+        rows.append([InlineKeyboardButton("✏️ Изменить", callback_data=f"quickedit:{h['id']}")])
     rows.append([
         InlineKeyboardButton("➕ Добавить", callback_data="add"),
         InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
