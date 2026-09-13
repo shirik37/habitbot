@@ -1,4 +1,4 @@
-import os, json, random, logging
+import os, json, random, logging, re
 from datetime import time as dtime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -164,7 +164,14 @@ async def button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Добавить привычку
     elif cb == "add":
         user_state[uid] = {"action": "add"}
-        await q.edit_message_text("Как называется привычка?\n\nНапример: *Отжимания*, *Выпить воду*, *Прочитать 20 страниц*", parse_mode="Markdown")
+        await q.edit_message_text(
+            "Как называется привычка?\n\n"
+            "Можешь сразу указать время через пробел:\n"
+            "*Отжимания 07:30*\n\n"
+            "Или просто название, время спрошу отдельно:\n"
+            "*Выпить воду*",
+            parse_mode="Markdown"
+        )
 
     # Настройки
     elif cb == "settings":
@@ -239,12 +246,33 @@ async def message_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     u = get_user(data, uid)
 
     if state["action"] == "add":
-        # Сохраняем название, спрашиваем время
-        user_state[uid] = {"action": "add_time", "name": text, "emoji": "✅"}
-        await update.message.reply_text(
-            f"Привычка: *{text}*\n\nТеперь введи время напоминания в формате *ЧЧ:ММ*\nНапример: `07:30`\n\nЕсли напоминание не нужно — отправь `-`",
-            parse_mode="Markdown"
-        )
+        name, time_str = parse_name_and_time(text)
+        if time_str:
+            # Название и время указаны сразу
+            habit = {
+                "id": u["next_id"],
+                "name": name,
+                "emoji": "✅",
+                "time": time_str,
+                "done": False
+            }
+            u["habits"].append(habit)
+            u["next_id"] += 1
+            save(data)
+            user_state.pop(uid, None)
+            reschedule(ctx.application, uid, u["habits"])
+            await update.message.reply_text(
+                main_text(u["habits"]),
+                reply_markup=habits_keyboard(u["habits"]),
+                parse_mode="Markdown"
+            )
+        else:
+            # Время не указано — спрашиваем отдельно
+            user_state[uid] = {"action": "add_time", "name": name, "emoji": "✅"}
+            await update.message.reply_text(
+                f"Привычка: *{name}*\n\nТеперь введи время напоминания в формате *ЧЧ:ММ*\nНапример: `07:30`\n\nЕсли напоминание не нужно — отправь `-`",
+                parse_mode="Markdown"
+            )
 
     elif state["action"] == "add_time":
         t = text if text != "-" else ""
@@ -295,6 +323,17 @@ def valid_time(t):
         h, m = t.split(":")
         return 0 <= int(h) <= 23 and 0 <= int(m) <= 59
     except: return False
+
+def parse_name_and_time(text):
+    """Пытается найти время (ЧЧ:ММ) в конце строки и отделить его от названия."""
+    match = re.search(r'(\d{1,2}):(\d{2})\s*$', text)
+    if match:
+        time_str = f"{int(match.group(1)):02d}:{match.group(2)}"
+        if valid_time(time_str):
+            name = text[:match.start()].strip(" -,")
+            if name:
+                return name, time_str
+    return text.strip(), None
 
 # ─── Планировщик уведомлений ──────────────────────────────────────────────────
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
