@@ -150,9 +150,20 @@ def get_funny(name):
 # ─── Клавиатуры ───────────────────────────────────────────────────────────────
 EMOJIS = ["💪","💧","🏃","📚","🧘","🥗","😴","✍️","🌿","🛁","🌅","🎵","🚴","🏋️","🤸","🍎","☕","🦷","🧠","❤️","🎯","⚡","🔥","🏆","✅","🚀","🎉","🌊","🧹","🥤"]
 
+def is_habit_today(h):
+    """Проверяет, запланирована ли привычка на сегодня."""
+    days = h.get("days")
+    if not days or len(days) == 7:
+        return True
+    return date.today().weekday() in days
+
+def todays_habits(habits):
+    return [h for h in habits if is_habit_today(h)]
+
 def habits_keyboard(habits):
     rows = []
-    sorted_habits = sorted(habits, key=lambda h: h["time"] if h.get("time") else "99:99")
+    today = todays_habits(habits)
+    sorted_habits = sorted(today, key=lambda h: h["time"] if h.get("time") else "99:99")
     for h in sorted_habits:
         check = "✅" if h["done"] else "⬜"
         streak = compute_streak(h.get("history", []))
@@ -207,9 +218,13 @@ def emoji_keyboard(hid):
 
 # ─── Статистика ───────────────────────────────────────────────────────────────
 def progress_text(habits):
-    if not habits: return "Пока нет привычек. Нажми ➕ чтобы добавить!"
-    done = sum(1 for h in habits if h["done"])
-    total = len(habits)
+    today = todays_habits(habits)
+    if not today:
+        if habits:
+            return "На сегодня привычек нет 🎉\n\nДругие привычки запланированы на другие дни."
+        return "Пока нет привычек. Нажми ➕ чтобы добавить!"
+    done = sum(1 for h in today if h["done"])
+    total = len(today)
     pct = int(done / total * 100)
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
     if pct == 100:
@@ -217,7 +232,7 @@ def progress_text(habits):
     return f"[{bar}] {done}/{total} — {pct}%"
 
 def main_text(habits):
-    return f"📋 *Мои привычки*\n\n{progress_text(habits)}"
+    return f"📋 *Мои привычки на сегодня*\n\n{progress_text(habits)}"
 
 def stats_text(habits):
     if not habits:
